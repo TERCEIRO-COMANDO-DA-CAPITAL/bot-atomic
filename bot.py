@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Atomic Bot – Sistema profissional de spam, DM HTML, servidores em comum, perfil e status.
-Uso exclusivo via slash commands. Permissões controladas por dono e usuários autorizados.
+Atomic Bot V2 - Sistema profissional de spam, DM HTML, servidores em comum, perfil, status.
+Todos os comandos utilizam ID numérico. Painel de controle interativo via Select Menu.
 """
 
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ui import Select, View
 import json
 import asyncio
 import io
-import os
 from pathlib import Path
 from typing import Set, Optional
 
@@ -19,7 +18,6 @@ CONFIG_FILE = Path("config.json")
 AUTHORIZED_FILE = Path("dados/autorizados.txt")
 OWNERS_FILE = Path("dados/donos.txt")
 
-# Criar pastas se não existirem
 AUTHORIZED_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 def load_token() -> Optional[str]:
@@ -53,104 +51,335 @@ def is_authorized(user_id: int) -> bool:
     return user_id in OWNER_IDS or str(user_id) in authorized_users
 
 if not TOKEN:
-    print("Erro: config.json não encontrado ou token ausente. Execute setup.py primeiro.")
+    print("Erro: config.json não encontrado. Execute o setup primeiro.")
     exit(1)
 
-if not OWNER_IDS:
-    print("Aviso: Nenhum dono configurado. Use setup.py para definir os IDs dos donos.")
+# ======================== CLASSE DO PAINEL V2 ========================
+class PainelView(View):
+    def __init__(self, bot, interaction_user):
+        super().__init__(timeout=120)
+        self.bot = bot
+        self.interaction_user = interaction_user
 
-# ======================== BOT ========================
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.presences = True
-intents.dm_messages = True
-intents.guilds = True
+    @discord.ui.select(
+        placeholder="Selecione uma opção do painel",
+        options=[
+            discord.SelectOption(label="Enviar Spam", description="Envia mensagens em massa para um ID", emoji="📨"),
+            discord.SelectOption(label="Exportar DM HTML", description="Gera HTML da conversa com usuário", emoji="📄"),
+            discord.SelectOption(label="Servidores em Comum", description="Lista servidores que compartilha com o ID", emoji="🌐"),
+            discord.SelectOption(label="Perfil do Usuário", description="Mostra avatar, banner, bio", emoji="👤"),
+            discord.SelectOption(label="Status do Usuário", description="Verifica se está online/offline", emoji="🟢"),
+            discord.SelectOption(label="Gerenciar Autorizados", description="Adicionar ou remover usuários", emoji="⚙️")
+        ]
+    )
+    async def menu_callback(self, interaction: discord.Interaction, select: Select):
+        if interaction.user.id != self.interaction_user.id:
+            embed = discord.Embed(title="Acesso Negado", description="Apenas quem abriu o painel pode usar.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
 
-bot = discord.Client(intents=intents)
+        if select.values[0] == "Enviar Spam":
+            await interaction.response.send_modal(SpamModal(self.bot, interaction.user))
+        elif select.values[0] == "Exportar DM HTML":
+            await interaction.response.send_modal(DMHtmlModal(self.bot, interaction.user))
+        elif select.values[0] == "Servidores em Comum":
+            await interaction.response.send_modal(ServersModal(self.bot, interaction.user))
+        elif select.values[0] == "Perfil do Usuário":
+            await interaction.response.send_modal(PerfilModal(self.bot, interaction.user))
+        elif select.values[0] == "Status do Usuário":
+            await interaction.response.send_modal(StatusModal(self.bot, interaction.user))
+        elif select.values[0] == "Gerenciar Autorizados":
+            if not is_authorized(interaction.user.id):
+                embed = discord.Embed(title="Permissão Negada", description="Apenas donos ou autorizados podem gerenciar.", color=0xff0000)
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+            await interaction.response.send_modal(AdminModal(self.bot, interaction.user))
+
+# ======================== MODAIS PARA ENTRADA DE ID ========================
+class SpamModal(discord.ui.Modal, title="Enviar Spam"):
+    user_id = discord.ui.TextInput(label="ID do Usuário", placeholder="Digite o ID numérico", required=True)
+    message = discord.ui.TextInput(label="Mensagem", placeholder="Conteúdo da mensagem", style=discord.TextStyle.paragraph, required=True)
+    quantity = discord.ui.TextInput(label="Quantidade", placeholder="Número de vezes (padrão 5)", required=False, default="5")
+
+    def __init__(self, bot, author):
+        super().__init__()
+        self.bot = bot
+        self.author = author
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_authorized(self.author.id):
+            embed = discord.Embed(title="Permissão Negada", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        try:
+            user = await self.bot.fetch_user(int(self.user_id.value))
+        except:
+            embed = discord.Embed(title="Erro", description="ID de usuário inválido.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        qtd = int(self.quantity.value) if self.quantity.value.isdigit() else 5
+        if qtd < 1:
+            embed = discord.Embed(title="Erro", description="Quantidade deve ser maior que zero.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        embed = discord.Embed(title="Spam Iniciado", description=f"Enviando {qtd} mensagens para {user.name} (ID: {user.id})", color=0x3498db)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+        try:
+            dm = await user.create_dm()
+            for i in range(qtd):
+                await dm.send(f"{self.message.value} (mensagem {i+1}/{qtd})")
+                await asyncio.sleep(0.5)
+            embed_success = discord.Embed(title="Spam Concluído", description=f"{qtd} mensagens enviadas para {user.name}.", color=0x00ff00)
+        except discord.Forbidden:
+            embed_success = discord.Embed(title="Erro", description=f"Não foi possível enviar DM para {user.name}.", color=0xff0000)
+        except Exception as e:
+            embed_success = discord.Embed(title="Erro", description=str(e), color=0xff0000)
+
+        await interaction.followup.send(embed=embed_success, ephemeral=True)
+
+class DMHtmlModal(discord.ui.Modal, title="Exportar DM HTML"):
+    user_id = discord.ui.TextInput(label="ID do Usuário", placeholder="Digite o ID numérico", required=True)
+
+    def __init__(self, bot, author):
+        super().__init__()
+        self.bot = bot
+        self.author = author
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_authorized(self.author.id):
+            embed = discord.Embed(title="Permissão Negada", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        try:
+            user = await self.bot.fetch_user(int(self.user_id.value))
+        except:
+            embed = discord.Embed(title="Erro", description="ID de usuário inválido.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            dm_channel = await user.create_dm()
+            messages = []
+            async for msg in dm_channel.history(limit=200):
+                messages.append(msg)
+
+            if not messages:
+                embed = discord.Embed(title="Nenhuma Mensagem", description=f"Não há mensagens com {user.name}.", color=0xffaa00)
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+
+            html = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Conversa com {user.name}</title>
+<style>
+body {{ font-family: Arial; background: #36393f; color: #fff; padding: 20px; }}
+.msg {{ margin-bottom: 15px; padding: 10px; border-radius: 10px; }}
+.bot {{ background: #5865f2; }}
+.user {{ background: #40444b; }}
+.date {{ font-size: 0.7em; color: #b9bbbe; }}
+</style></head>
+<body><h2>Conversa com {user.name} (ID: {user.id})</h2>"""
+            for msg in reversed(messages):
+                role = "bot" if msg.author.bot else "user"
+                html += f'<div class="msg {role}"><strong>{msg.author.name}:</strong> {msg.content}<br><span class="date">{msg.created_at.strftime("%d/%m/%Y %H:%M:%S")}</span></div>'
+            html += "</body></html>"
+
+            file = discord.File(io.BytesIO(html.encode()), filename=f"dm_{user.name}.html")
+            embed_success = discord.Embed(title="Arquivo Gerado", description=f"Conversa com {user.name} exportada.", color=0x00ff00)
+            await interaction.followup.send(embed=embed_success, file=file, ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(embed=discord.Embed(title="Erro", description=str(e), color=0xff0000), ephemeral=True)
+
+class ServersModal(discord.ui.Modal, title="Servidores em Comum"):
+    user_id = discord.ui.TextInput(label="ID do Usuário", placeholder="Digite o ID numérico", required=True)
+
+    def __init__(self, bot, author):
+        super().__init__()
+        self.bot = bot
+        self.author = author
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_authorized(self.author.id):
+            embed = discord.Embed(title="Permissão Negada", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        try:
+            user = await self.bot.fetch_user(int(self.user_id.value))
+        except:
+            embed = discord.Embed(title="Erro", description="ID inválido.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        mutual = [g for g in self.bot.guilds if g.get_member(user.id)]
+        if not mutual:
+            embed = discord.Embed(title="Servidores em Comum", description=f"Nenhum servidor compartilhado com {user.name}.", color=0xffaa00)
+        else:
+            desc = "\n".join([f"- {g.name} (ID: {g.id})" for g in mutual[:25]])
+            embed = discord.Embed(title=f"Servidores com {user.name}", description=desc, color=0x3498db)
+            if len(mutual) > 25:
+                embed.set_footer(text=f"Exibindo 25 de {len(mutual)}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class PerfilModal(discord.ui.Modal, title="Perfil do Usuário"):
+    user_id = discord.ui.TextInput(label="ID do Usuário", placeholder="Digite o ID numérico", required=True)
+
+    def __init__(self, bot, author):
+        super().__init__()
+        self.bot = bot
+        self.author = author
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_authorized(self.author.id):
+            embed = discord.Embed(title="Permissão Negada", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        try:
+            user = await self.bot.fetch_user(int(self.user_id.value))
+        except:
+            embed = discord.Embed(title="Erro", description="ID inválido.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        avatar = user.display_avatar.url
+        banner = user.banner.url if user.banner else None
+        bio = getattr(user, 'bio', None) or "Não disponível"
+
+        embed = discord.Embed(title=f"Perfil de {user.name}", color=0x9b59b6)
+        embed.set_thumbnail(url=avatar)
+        if banner:
+            embed.set_image(url=banner)
+        embed.add_field(name="Nome", value=f"{user.name}#{user.discriminator if user.discriminator != '0' else ''}", inline=True)
+        embed.add_field(name="ID", value=str(user.id), inline=True)
+        embed.add_field(name="Biografia", value=bio[:500], inline=False)
+        embed.set_footer(text=f"Criado em {user.created_at.strftime('%d/%m/%Y')}")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class StatusModal(discord.ui.Modal, title="Status do Usuário"):
+    user_id = discord.ui.TextInput(label="ID do Usuário", placeholder="Digite o ID numérico", required=True)
+
+    def __init__(self, bot, author):
+        super().__init__()
+        self.bot = bot
+        self.author = author
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_authorized(self.author.id):
+            embed = discord.Embed(title="Permissão Negada", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        try:
+            user = await self.bot.fetch_user(int(self.user_id.value))
+        except:
+            embed = discord.Embed(title="Erro", description="ID inválido.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        member = None
+        for g in self.bot.guilds:
+            m = g.get_member(user.id)
+            if m:
+                member = m
+                break
+
+        if member:
+            status_map = {discord.Status.online: "Online", discord.Status.idle: "Ausente", discord.Status.dnd: "Não Perturbe", discord.Status.offline: "Offline"}
+            status = status_map.get(member.status, "Desconhecido")
+            color = 0x2ecc71 if member.status == discord.Status.online else 0x95a5a6
+            embed = discord.Embed(title=f"Status de {user.name}", description=f"**{status}**", color=color)
+            if member.activity:
+                embed.add_field(name="Atividade", value=member.activity.name)
+        else:
+            embed = discord.Embed(title="Status Indisponível", description=f"Sem servidor em comum com {user.name}.", color=0xffaa00)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class AdminModal(discord.ui.Modal, title="Gerenciar Autorizados"):
+    acao = discord.ui.TextInput(label="Ação", placeholder="add ou remove", required=True)
+    user_id = discord.ui.TextInput(label="ID do Usuário", placeholder="ID numérico", required=True)
+
+    def __init__(self, bot, author):
+        super().__init__()
+        self.bot = bot
+        self.author = author
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_authorized(self.author.id):
+            embed = discord.Embed(title="Permissão Negada", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        acao = self.acao.value.lower().strip()
+        uid = self.user_id.value.strip()
+
+        try:
+            user = await self.bot.fetch_user(int(uid))
+        except:
+            embed = discord.Embed(title="Erro", description="ID inválido.", color=0xff0000)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        if acao == "add":
+            authorized_users.add(str(user.id))
+            save_authorized(authorized_users)
+            embed = discord.Embed(title="Usuário Autorizado", description=f"{user.name} (ID: {user.id}) pode usar os comandos.", color=0x00ff00)
+        elif acao == "remove":
+            if str(user.id) in authorized_users:
+                authorized_users.remove(str(user.id))
+                save_authorized(authorized_users)
+                embed = discord.Embed(title="Autorização Revogada", description=f"{user.name} (ID: {user.id}) não tem mais permissão.", color=0xffaa00)
+            else:
+                embed = discord.Embed(title="Nada a Remover", description=f"{user.name} não estava autorizado.", color=0xffaa00)
+        else:
+            embed = discord.Embed(title="Erro", description="Ação inválida. Use 'add' ou 'remove'.", color=0xff0000)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# ======================== COMANDOS SLASH ========================
+bot = discord.Client(intents=discord.Intents.all())
 tree = app_commands.CommandTree(bot)
 
-# ======================== EVENTOS ========================
 @bot.event
 async def on_ready():
     await tree.sync()
     print(f"Bot logado como {bot.user}")
     print(f"Donos: {OWNER_IDS}")
-    print(f"Usuários autorizados: {len(authorized_users)}")
-    print("Slash commands sincronizados globalmente.")
+    print(f"Autorizados: {len(authorized_users)}")
 
-# ======================== COMANDOS DE PERMISSÃO (APENAS DONO) ========================
-@tree.command(name="allow_user", description="Autoriza um usuário a usar os comandos do bot")
-@app_commands.describe(user_id="ID numérico do usuário a ser autorizado")
-async def allow_user(interaction: discord.Interaction, user_id: str):
-    if interaction.user.id not in OWNER_IDS:
-        embed = discord.Embed(title="Permissão Negada", description="Apenas o dono pode executar este comando.", color=0xff0000)
+@tree.command(name="painel", description="Abre o painel de controle V2 com todas as opções")
+async def painel(interaction: discord.Interaction):
+    if not is_authorized(interaction.user.id):
+        embed = discord.Embed(title="Permissão Negada", description="Você não está autorizado.", color=0xff0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    try:
-        user = await bot.fetch_user(int(user_id))
-    except:
-        embed = discord.Embed(title="Erro", description="ID de usuário inválido.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
+    embed = discord.Embed(
+        title="Painel de Controle Atomic V2",
+        description="Selecione uma opção no menu abaixo para executar a ação desejada.",
+        color=0x2c3e50
+    )
+    embed.add_field(name="Spam", value="Envia mensagens em massa para um ID", inline=True)
+    embed.add_field(name="DM HTML", value="Exporta conversa em arquivo HTML", inline=True)
+    embed.add_field(name="Servidores", value="Lista servidores em comum", inline=True)
+    embed.add_field(name="Perfil", value="Mostra avatar, banner e bio", inline=True)
+    embed.add_field(name="Status", value="Verifica online/offline", inline=True)
+    embed.add_field(name="Admin", value="Gerencia usuários autorizados", inline=True)
+    embed.set_footer(text="Atomic Bot V2 | Desenvolvido para TCC Host")
 
-    authorized_users.add(str(user.id))
-    save_authorized(authorized_users)
-    embed = discord.Embed(title="Autorização Concedida", description=f"{user.mention} agora pode usar todos os comandos do bot.", color=0x00ff00)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    view = PainelView(bot, interaction.user)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-@tree.command(name="revoke_user", description="Revoga a autorização de um usuário")
-@app_commands.describe(user_id="ID numérico do usuário a ser removido")
-async def revoke_user(interaction: discord.Interaction, user_id: str):
-    if interaction.user.id not in OWNER_IDS:
-        embed = discord.Embed(title="Permissão Negada", description="Apenas o dono pode executar este comando.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
-    try:
-        user = await bot.fetch_user(int(user_id))
-    except:
-        embed = discord.Embed(title="Erro", description="ID de usuário inválido.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
-    if str(user.id) in authorized_users:
-        authorized_users.remove(str(user.id))
-        save_authorized(authorized_users)
-        embed = discord.Embed(title="Autorização Revogada", description=f"{user.mention} não tem mais permissão para usar os comandos.", color=0xffaa00)
-    else:
-        embed = discord.Embed(title="Nada a Revogar", description=f"{user.mention} não estava na lista de autorizados.", color=0xffaa00)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@tree.command(name="list_allowed", description="Lista todos os usuários autorizados")
-async def list_allowed(interaction: discord.Interaction):
-    if interaction.user.id not in OWNER_IDS:
-        embed = discord.Embed(title="Permissão Negada", description="Apenas o dono pode executar este comando.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
-    if not authorized_users:
-        embed = discord.Embed(title="Usuários Autorizados", description="Nenhum usuário adicional autorizado.", color=0x3498db)
-    else:
-        mentions = []
-        for uid in authorized_users:
-            try:
-                user = await bot.fetch_user(int(uid))
-                mentions.append(f"{user.name} (ID: {uid})")
-            except:
-                mentions.append(f"ID desconhecido: {uid}")
-        embed = discord.Embed(title="Usuários Autorizados", description="\n".join(mentions), color=0x3498db)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# ======================== COMANDOS PRINCIPAIS (PROTEGIDOS) ========================
-@tree.command(name="spam", description="Envia N mensagens para um usuário via DM (precisa de servidor em comum)")
-@app_commands.describe(
-    user_id="ID numérico do usuário alvo",
-    message="Conteúdo da mensagem",
-    quantity="Número de vezes a enviar (padrão 5)"
-)
-async def spam(interaction: discord.Interaction, user_id: str, message: str, quantity: int = 5):
+# ======================== COMANDOS DIRETOS (OPCIONAIS) ========================
+@tree.command(name="spam", description="Envia mensagens em massa para um ID")
+@app_commands.describe(user_id="ID numérico", message="Mensagem", quantity="Quantidade")
+async def spam_direct(interaction: discord.Interaction, user_id: str, message: str, quantity: int = 5):
     if not is_authorized(interaction.user.id):
         embed = discord.Embed(title="Permissão Negada", color=0xff0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -159,81 +388,31 @@ async def spam(interaction: discord.Interaction, user_id: str, message: str, qua
     try:
         user = await bot.fetch_user(int(user_id))
     except:
-        embed = discord.Embed(title="Erro", description="ID de usuário inválido.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
-    # Verifica se o bot e o usuário compartilham algum servidor
-    mutual_guild = None
-    for guild in bot.guilds:
-        if guild.get_member(user.id):
-            mutual_guild = guild
-            break
-
-    if not mutual_guild:
-        embed = discord.Embed(
-            title="Não é possível enviar DM",
-            description=f"Não há servidores em comum com {user.name}.\nO bot só pode iniciar conversa com usuários que estejam em pelo menos um servidor que o bot também participa.",
-            color=0xffaa00
-        )
+        embed = discord.Embed(title="Erro", description="ID inválido.", color=0xff0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
     if quantity < 1:
-        embed = discord.Embed(title="Erro", description="A quantidade deve ser maior que zero.", color=0xff0000)
+        embed = discord.Embed(title="Erro", description="Quantidade > 0.", color=0xff0000)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
 
-    embed_start = discord.Embed(title="Spam Iniciado", description=f"Enviando {quantity} mensagens para {user.mention}.", color=0x3498db)
-    await interaction.response.send_message(embed=embed_start, ephemeral=True)
+    embed = discord.Embed(title="Spam Iniciado", description=f"Enviando {quantity} mensagens para {user.name}", color=0x3498db)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
     try:
         dm = await user.create_dm()
         for i in range(quantity):
-            await dm.send(f"{message} (mensagem {i+1}/{quantity})")
+            await dm.send(f"{message} ({i+1}/{quantity})")
             await asyncio.sleep(0.5)
-        embed_success = discord.Embed(title="Spam Concluído", description=f"{quantity} mensagens enviadas para {user.name}.", color=0x00ff00)
-    except discord.Forbidden:
-        embed_success = discord.Embed(title="Erro", description=f"Não foi possível enviar DM para {user.name}. Usuário bloqueou o bot ou desativou DMs.", color=0xff0000)
+        embed_success = discord.Embed(title="Concluído", description=f"{quantity} mensagens enviadas.", color=0x00ff00)
     except Exception as e:
         embed_success = discord.Embed(title="Erro", description=str(e), color=0xff0000)
-
     await interaction.followup.send(embed=embed_success, ephemeral=True)
 
-@tree.command(name="dm_html", description="Gera um arquivo HTML da conversa em DM com o usuário (últimas 200 mensagens)")
-@app_commands.describe(user_id="ID numérico do usuário")
-async def dm_html(interaction: discord.Interaction, user_id: str):
-    if not is_authorized(interaction.user.id):
-        embed = discord.Embed(title="Permissão Negada", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
-    try:
-        user = await bot.fetch_user(int(user_id))
-    except:
-        embed = discord.Embed(title="Erro", description="ID de usuário inválido.", color=0xff0000)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=True)
-
-    try:
-        dm_channel = await user.create_dm()
-        messages = []
-        async for msg in dm_channel.history(limit=200):
-            messages.append(msg)
-
-        if not messages:
-            embed = discord.Embed(title="Nenhuma Mensagem", description=f"Não há mensagens na conversa com {user.name}.", color=0xffaa00)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        html_content = f"""<!DOCTYPE html>
-<html>
-<head><meta charset="UTF-8"><title>Conversa com {user.name}</title>
-<style>
-body {{ font-family: Arial, Helvetica, sans-serif; background: #36393f; color: #fff; padding: 20px; }}
-.msg {{ margin-bottom: 15px; padding: 10px; border-radius: 10px; }}
+# ======================== EXECUÇÃO ========================
+if __name__ == "__main__":
+    bot.run(TOKEN){ margin-bottom: 15px; padding: 10px; border-radius: 10px; }}
 .bot {{ background: #5865f2; }}
 .user {{ background: #40444b; }}
 .date {{ font-size: 0.7em; color: #b9bbbe; }}
